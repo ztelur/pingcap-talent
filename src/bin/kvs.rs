@@ -1,26 +1,26 @@
 extern crate clap;
-use clap::{Arg, App, SubCommand};
-use std::env::Args;
+
+use clap::{Arg, App, SubCommand, AppSettings};
+use std::process::exit;
 
 
 fn main() {
-    let matches = App::new("kv")
-        .version("1.0")
-        .author("ztelur")
-        .about("kv client")
-        .arg(Arg::with_name("version")
-            .short("V")
-            .long("version"))
+    let matches = App::new(env!("CARGO_PKG_NAME"))
+        .version(env!("CARGO_PKG_VERSION"))
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
+        .setting(AppSettings::DisableHelpSubcommand)
+        .setting(AppSettings::SubcommandRequiredElseHelp)
+        .setting(AppSettings::VersionlessSubcommands)
         .subcommand(SubCommand::with_name("get")
             .about(" get value")
             .version("1.0")
             .author("ztelur")
             .arg(Arg::with_name("key")
                 .help("the key")
-                .index(1)
                 .required(true))
         ).subcommand(SubCommand::with_name("set")
-            .about("set key value")
+        .about("set key value")
         .version("1.0")
         .arg(Arg::with_name("key")
             .help("the key")
@@ -30,18 +30,27 @@ fn main() {
             .help("the value")
             .index(2)
             .required(true))
-        ).subcommand(SubCommand::with_name("rm")
-                                           .arg(Arg::with_name("key")
-                                            .index(1)
+    ).subcommand(SubCommand::with_name("rm")
+        .arg(Arg::with_name("key")
+            .index(1)
             .required(true))).get_matches();
 
-
-
-    match matches.subcommand_name() {
-        Some("set") => panic!(),
-        Some("get") => panic!(),
-        Some("del") => panic!(),
-        _ => panic!()
-
+    match matches.subcommand() {
+        ("set", Some(_matches)) => {
+            eprintln!("unimplemented");
+            println!("set key {} to value {}", _matches.value_of("key").unwrap(), _matches.value_of("value").unwrap());
+            exit(1)
+        },
+        ("get", Some(_matches)) => {
+            eprintln!("unimplemented");
+            println!("get key {}", _matches.value_of("key").unwrap());
+            exit(1)
+        },
+        ("rm", Some(_matches)) => {
+            eprintln!("unimplemented");
+            println!("del key {}", _matches.value_of("key").unwrap());
+            exit(1)
+        },
+        _ => unreachable!()
     }
 }
