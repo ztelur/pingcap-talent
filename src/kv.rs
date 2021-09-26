@@ -1,6 +1,10 @@
 
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::io::{BufReader, Read, Seek, SeekFrom, IoSliceMut, Initializer, Bytes, Chain, Take, Write, BufWriter, IoSlice};
+use crate::{KvsError, Result};
+use std::fmt::Arguments;
 
 /// the `KvStore` stores string key/value pairs
 ///
@@ -16,6 +20,9 @@ use std::collections::HashMap;
 /// ```
 pub struct KvStore {
     map: HashMap<String, String>,
+    // log and other data directory
+    path: PathBuf,
+    readers: HashMap<u64, BufReader>
 }
 
 impl Default for KvStore {
@@ -31,6 +38,8 @@ impl KvStore {
             map: HashMap::new(),
         }
     }
+
+
 
     /// Sets the value of a string key to a string
     ///
@@ -49,5 +58,70 @@ impl KvStore {
     /// remove the key
     pub fn remove(&mut self, key: String) {
         self.map.remove(&key);
+    }
+}
+
+struct BufReaderWithPo <R: Read + Seek> {
+    reader: BufReader<R>,
+    pos: u64,
+}
+
+impl<R: Read + Seek> BufReaderWithPo<R> {
+    fn new(mut inner: R) -> Result<Self> {
+        let pos = inner.seek(SeekFrom::Current(0))?;
+        Ok(
+            BufReaderWithPo {
+                reader: BufReader::new(inner),
+                pos,
+            }
+        )
+    }
+}
+
+impl<R: Read + Seek> Read for BufReaderWithPo<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = self.reader.read(buf);
+        self.pos += len as u64;
+        Ok(len)
+    }
+}
+
+impl<R: Read + Seek> Seek for BufReaderWithPo<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.pos = self.reader.seek(pos).unwrap();
+        OK(self.pos)
+    }
+}
+
+struct BufWriterWithPos<W: Write + Seek> {
+    writer: BufWriter<W>,
+    pos: u64,
+}
+
+impl<W: Write + Seek> BufWriterWithPos<W> {
+    fn new(mut inner: W) -> Result<Self> {
+        let pos = inner.seek(SeekFrom::Current(0))?;
+        Ok(BufWriterWithPos {
+            writer: BufWriter::new(inner),
+            pos,
+        })
+    }
+
+}
+
+impl<W: Write + Seek> Write for BufWriterWithPos<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        todo!()
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        todo!()
+    }
+}
+
+impl<W: Write + Seek> Seek for BufWriterWithPos<W> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.pos = self.writer.seek(pos)?;
+        OK(self.pos);
     }
 }
