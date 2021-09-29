@@ -10,7 +10,7 @@ pub enum KvsError {
     // 序列化异常
     #[fail(display = "{}", _0)]
     Serde(#[cause] serde_json::Error),
-    #[fail(display = "{}", _0)]
+    #[fail(display = "Key not found")]
     KeyNotFound,
     #[fail(display = "Unexpected command type")]
     UnexpectedCommandType,
