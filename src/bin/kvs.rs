@@ -1,7 +1,6 @@
-extern crate clap;
-
 use clap::{App, AppSettings, Arg, SubCommand};
-use kvs::Result;
+use kvs::{KvStore, KvsError, Result};
+use std::env::current_dir;
 use std::process::exit;
 
 fn main() -> Result<()> {
@@ -13,52 +12,59 @@ fn main() -> Result<()> {
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .setting(AppSettings::VersionlessSubcommands)
         .subcommand(
-            SubCommand::with_name("get")
-                .about(" get value")
-                .version("1.0")
-                .author("ztelur")
-                .arg(Arg::with_name("key").help("the key").required(true)),
-        )
-        .subcommand(
             SubCommand::with_name("set")
-                .about("set key value")
-                .version("1.0")
+                .about("Set the value of a string key to a string")
+                .arg(Arg::with_name("KEY").help("A string key").required(true))
                 .arg(
-                    Arg::with_name("key")
-                        .help("the key")
-                        .index(1)
-                        .required(true),
-                )
-                .arg(
-                    Arg::with_name("value")
-                        .help("the value")
-                        .index(2)
+                    Arg::with_name("VALUE")
+                        .help("The string value of the key")
                         .required(true),
                 ),
         )
-        .subcommand(SubCommand::with_name("rm").arg(Arg::with_name("key").index(1).required(true)))
+        .subcommand(
+            SubCommand::with_name("get")
+                .about("Get the string value of a given string key")
+                .arg(Arg::with_name("KEY").help("A string key").required(true)),
+        )
+        .subcommand(
+            SubCommand::with_name("rm")
+                .about("Remove a given key")
+                .arg(Arg::with_name("KEY").help("A string key").required(true)),
+        )
         .get_matches();
 
     match matches.subcommand() {
-        ("set", Some(_matches)) => {
-            eprintln!("unimplemented");
-            println!(
-                "set key {} to value {}",
-                _matches.value_of("key").unwrap(),
-                _matches.value_of("value").unwrap()
-            );
-            exit(1)
+        ("set", Some(matches)) => {
+            let key = matches.value_of("KEY").unwrap();
+            let value = matches.value_of("VALUE").unwrap();
+
+            let mut store = KvStore::open(current_dir()?)?;
+            store.set(key.to_string(), value.to_string())?;
         }
-        ("get", Some(_matches)) => {
-            eprintln!("unimplemented");
-            println!("get key {}", _matches.value_of("key").unwrap());
-            exit(1)
+        ("get", Some(matches)) => {
+            let key = matches.value_of("KEY").unwrap();
+
+            let mut store = KvStore::open(current_dir()?)?;
+            if let Some(value) = store.get(key.to_string())? {
+                println!("{}", value);
+            } else {
+                println!("Key not found");
+            }
         }
-        ("rm", Some(_matches)) => {
-            eprintln!("unimplemented");
-            println!("del key {}", _matches.value_of("key").unwrap());
-            exit(1)
+        ("rm", Some(matches)) => {
+            let key = matches.value_of("KEY").unwrap();
+
+            let mut store = KvStore::open(current_dir()?)?;
+            match store.remove(key.to_string()) {
+                Ok(()) => {}
+                Err(KvsError::KeyNotFound) => {
+                    println!("Key not found");
+                    exit(1);
+                }
+                Err(e) => return Err(e),
+            }
         }
         _ => unreachable!(),
     }
+    Ok(())
 }

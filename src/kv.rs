@@ -5,8 +5,11 @@ use std::path::{PathBuf, Path};
 use std::io::{BufReader, Read, Seek, SeekFrom, IoSliceMut, Bytes, Chain, Take, Write, BufWriter, IoSlice};
 use crate::{KvsError, Result};
 use std::fmt::Arguments;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, read};
 use std::ffi::OsStr;
+use serde_json::Deserializer;
+use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
@@ -45,7 +48,7 @@ impl KvStore {
 
         for &gen in &gen_list {
             let mut reader = BufReaderWithPo::new(File::open(log_path(&path, gen))?)?;
-            uncompacted += load(gen, &mut reader, &mut index);
+            uncompacted += load(gen, &mut reader, &mut index)?;
             readers.insert(gen, reader);
         }
 
@@ -53,7 +56,7 @@ impl KvStore {
 
         let writer = new_log_file(&path, current_gen, &mut readers)?;
 
-        OK(KvStore{
+        Ok(KvStore{
             path,
             readers,
             writer,
@@ -71,16 +74,16 @@ impl KvStore {
         let pos = self.writer.pos;
         serde_json::to_writer(&mut self.writer, &cmd);
         self.writer.flush()?;
-        if let Command::Set { key, ..} = cmd {
+        if let Command::Set { Key, ..} = cmd {
             if let Some(old_cmd) = self
                 .index
-                .insert(key, (self.current_gen, pos..self.writer.pos).into()) {
+                .insert(Key, (self.current_gen, pos..self.writer.pos).into()) {
                 self.uncompacted += old_cmd.len;
             }
         }
 
         if self.uncompacted > COMPACTION_THRESHOLD {
-            self.com
+            self.compact()?;
         }
         Ok(())
     }
@@ -88,13 +91,35 @@ impl KvStore {
     /// Gets the key value
     ///
     /// Return `None` if the key not exist.
-    pub fn get(&self, key: String) -> Option<String> {
-        return self.map.get(&key).cloned();
+    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+        if let Some(cmd_pos) = self.index.get(&key) {
+            let reader = self.readers.get_mut(&cmd_pos.gen).expect("Cannot find log reader");
+            reader.seek(SeekFrom::Start(cmd_pos.pos))?;
+            let cmd_reader = reader.take(cmd_pos.len);
+            if let Command::Set { Value, ..} = serde_json::from_reader(cmd_reader)? {
+                Ok(Some(Value))
+            } else {
+                Err(KvsError::UnexpectedCommandType)
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     /// remove the key
-    pub fn remove(&mut self, key: String) {
-        self.map.remove(&key);
+    pub fn remove(&mut self, key: String) -> Result<()>{
+        if self.index.contains_key(&key) {
+            let cmd = Command::remove(key);
+            serde_json::to_writer(&mut self.writer, &cmd)?;
+            self.writer.flush()?;
+            if let Command::Remove { Key} = cmd {
+                let old_cmd = self.index.remove(&Key).expect("key not found");
+                self.uncompacted += old_cmd.len;
+            }
+            Ok(())
+        } else {
+            Err(KvsError::KeyNotFound)
+        }
     }
 
 
@@ -103,27 +128,42 @@ impl KvStore {
         // increase current gen by 2. current_gen + 1 is for the compact file
         let compaction_gen = self.current_gen + 1;
         self.current_gen +=2;
+        // 保证写入的正常
         self.writer = self.new_log_file(self.current_gen)?;
-
-        let mut compaction_writer = self.new_log_file(compaction_gen);
+        // 后期其实是可以异步操作的
+        let mut compaction_writer = self.new_log_file(compaction_gen)?;
 
         let mut new_pos = 0; // pos in the new log file
         for cmd_pos in &mut self.index.values_mut() {
+            // 根据gen找到对应的reader
             let reader = self.readers
                 .get_mut(&cmd_pos.gen)
                 .expect("Cannot find log reader");
-
+            // 寻址
             if reader.pos != cmd_pos.pos {
                 reader.seek(SeekFrom::Start(cmd_pos.pos))?;
             }
-
+            // 读出一行
             let mut entry_reader = reader.take(cmd_pos.len);
-            let len = std::io::copy(&mut entry_reader, &mut compaction_writer);
+            // 写入到compaction 中
+            let len = std::io::copy(&mut entry_reader, &mut compaction_writer)?;
+            // 修改值
             *cmd_pos = (compaction_gen, new_pos..new_pos + len).into();
+            // 写入位置累加
             new_pos += len;
         }
 
-        compaction_writer
+        compaction_writer.flush();
+        // 删除无用的文件
+        let stable_gens: Vec<_> = self.readers.keys().filter(|&&gen|gen < compaction_gen).cloned().collect();
+
+        for stable_gen in stable_gens {
+            self.readers.remove(&stable_gen);
+            std::fs::remove_file(log_path(&self.path, stable_gen))?;
+        }
+        self.uncompacted = 0;
+
+        Ok(())
     }
 
     fn new_log_file(&mut self, gen: u64) -> Result<BufWriterWithPos<File>> {
@@ -131,6 +171,37 @@ impl KvStore {
     }
 
 }
+
+fn load(
+    gen: u64,
+    reader: &mut BufReaderWithPo<File>,
+    index: &mut BTreeMap<String, CommandPos>,
+) -> Result<u64> {
+    let mut pos = reader.seek(SeekFrom::Start(0))?;
+    let mut stream = Deserializer::from_reader(reader).into_iter::<Command>();
+    let mut uncompacted = 0;
+    while let Some(cmd) = stream.next() {
+        let new_pos = stream.byte_offset() as u64;
+        match cmd? {
+            Command::Set {Key, ..} => {
+                if let Some(old_cmd) = index.insert(Key, (gen, pos..new_pos).into()) {
+                    uncompacted += old_cmd.len;
+                }
+            }
+            Command:: Remove { Key} => {
+                if let Some(old_cmd) = index.remove(&Key) {
+                    uncompacted += old_cmd.len;
+                }
+                uncompacted += new_pos - pos;
+            }
+        }
+        pos = new_pos;
+    }
+    Ok(uncompacted)
+}
+
+
+
 
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -158,7 +229,15 @@ struct CommandPos {
     len: u64,
 }
 
-
+impl From<(u64, Range<u64>)> for CommandPos {
+    fn from((gen, range): (u64, Range<u64>)) -> Self {
+        CommandPos {
+            gen,
+            pos: range.start,
+            len: range.end - range.start,
+        }
+    }
+}
 
 struct BufReaderWithPo <R: Read + Seek> {
     reader: BufReader<R>,
