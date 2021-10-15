@@ -3,6 +3,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use crossbeam_skiplist::SkipMap;
+
 
 use serde::{Deserialize, Serialize};
 use serde_json::Deserializer;
@@ -10,6 +12,9 @@ use serde_json::Deserializer;
 use super::KvsEngine;
 use crate::{KvsError, Result};
 use std::ffi::OsStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::RefCell;
 
 const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
@@ -33,16 +38,9 @@ const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 /// ```
 pub struct KvStore {
     // directory for the log and other data
-    path: PathBuf,
-    // map generation number to the file reader
-    readers: HashMap<u64, BufReaderWithPos<File>>,
-    // writer of the current log
-    writer: BufWriterWithPos<File>,
-    current_gen: u64,
-    index: BTreeMap<String, CommandPos>,
-    // the number of bytes representing "stale" commands that could be
-    // deleted during a compaction
-    uncompacted: u64,
+    path: Arc<PathBuf>,
+    index: Arc<SkipMapp<String, CommandPos>>
+    reader: KvsSt
 }
 
 impl KvStore {
@@ -141,7 +139,7 @@ impl KvsEngine for KvStore {
     /// # Errors
     ///
     /// It propagates I/O or serialization errors during writing the log.
-    fn set(&mut self, key: String, value: String) -> Result<()> {
+    fn set(&self, key: String, value: String) -> Result<()> {
         let cmd = Command::set(key, value);
         let pos = self.writer.pos;
         serde_json::to_writer(&mut self.writer, &cmd)?;
@@ -164,7 +162,7 @@ impl KvsEngine for KvStore {
     /// Gets the string value of a given string key.
     ///
     /// Returns `None` if the given key does not exist.
-    fn get(&mut self, key: String) -> Result<Option<String>> {
+    fn get(&self, key: String) -> Result<Option<String>> {
         if let Some(cmd_pos) = self.index.get(&key) {
             let reader = self
                 .readers
@@ -189,7 +187,7 @@ impl KvsEngine for KvStore {
     /// It returns `KvsError::KeyNotFound` if the given key is not found.
     ///
     /// It propagates I/O or serialization errors during writing the log.
-    fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&self, key: String) -> Result<()> {
         if self.index.contains_key(&key) {
             let cmd = Command::remove(key);
             serde_json::to_writer(&mut self.writer, &cmd)?;
@@ -377,3 +375,59 @@ impl<W: Write + Seek> Seek for BufWriterWithPos<W> {
         Ok(self.pos)
     }
 }
+
+
+struct KvStoreReader {
+    path: Arc<PathBuf>,
+    safe_point: Arc<AtomicU64>,
+    readers: RefCell<BTreeMap<u64, BufReaderWithPos<File>>>
+}
+
+impl KvStoreReader {
+    fn close_stale_handles(&self) {
+        let mut readers = self.readers.borrow_mut();
+        while !readers.is_empty() {
+            let first_gen = *readers.keys().next().unwrap();
+            if self.safe_point.load(Ordering::SeqCst) <= first_gen {
+                break;
+            }
+            readers.remove(&first_gen);
+        }
+    }
+
+    fn read_and<F, R>(&self, cmd_pos: CommandPos, f: F) -> Result<R>
+        where
+            F: FnOnce(io::Take<&mut BufReaderWithPos<File>>) -> Result<R>, {
+
+        self.close_stale_handles();
+
+        let mut readers = self.readers.borrow_mut();
+
+        if !readers.contains_key(&cmd_pos.gen) {
+            let reader = BufReaderWithPos::new(File::open(log_path(&self.path, cmd_pos.gen))?)?;
+            readers.insert(cmd_pos.gen, reader);
+        }
+        let reader = readers.get_mut(&cmd_pos.gen).unwrap();
+        reader.seek(SeekFrom::Start(cmd_pos.pos))?;
+        let cmd_reader = reader.take(cmd_pos.len);
+        f(cmd_reader)
+    }
+
+    fn read_command(&self, cmd_pos: CommandPos) -> Result<Command> {
+        self.read_and(cmd_pos, |cmd_reader| {
+            Ok(serde_json::from_reader(cmd_reader)?)
+        })
+    }
+}
+
+impl Clone for KvStoreReader {
+    fn clone(&self) -> KvStoreReader {
+        KvStoreReader {
+            path: Arc::clone(&self.path),
+            safe_point: Arc::clone(&self.safe_point),
+            readers: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+

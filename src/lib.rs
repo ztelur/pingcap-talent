@@ -1,9 +1,9 @@
 mod error;
-mod kv;
 mod client;
 mod common;
 mod server;
 mod engines;
+mod thread_pool;
 
 pub use error::{KvsError, Result};
 pub use kv::KvStore;
