@@ -37,6 +37,7 @@ fn set_bench(c: &mut Criterion) {
            BatchSize::SmallInput,
        )
 
+
     });
 
     group.finish();
