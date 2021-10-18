@@ -430,4 +430,37 @@ impl Clone for KvStoreReader {
     }
 }
 
+struct KvStoreWriter {
+    reader: KvStoreReader,
+    writer: BufReaderWithPos<File>,
+    current_gen: u64,
+    uncompacted: u64,
+    path: Arc<PathBuf>,
+    index: Arc<SkipMap<String, CommandPos>>,
+}
+
+impl KvStoreWriter {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let cmd = Command::set(key, value);
+        let pos = self.writer.pos;
+        serde_json::to_writer(&mut self.writer, &cmd)?;
+
+        self.writer.flush()?;
+
+        if let Command::Set {key, ..} = cmd {
+            if let Some(old_cmd) = self.index.get(&key) {
+                self.uncompacted += old_cmd.value().len;
+            }
+            self.index.insert(key, (self.current_gen, pos..self.writer.pos).into());
+        }
+
+        if self.uncompacted > COMPACTION_THRESHOLD {
+            self.compact()?;
+        }
+        Ok(())
+    }
+}
+
+
+
 
